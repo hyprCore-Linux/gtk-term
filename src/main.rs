@@ -174,7 +174,7 @@ fn show_about(app: &gtk::Application) {
             "gtk-term standalone terminal application, in Rust that provides a themeable VTE terminal emulator.",
         )
         .authors(["Created by Kevin Hinds"])
-        .license_type(gtk::License::MitX11)
+        .license_type(gtk::License::Gpl30)
         .build();
     if let Some(win) = app.active_window() {
         about.set_transient_for(Some(&win));
