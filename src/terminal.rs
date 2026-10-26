@@ -1,0 +1,207 @@
+//! Build a themed VTE terminal widget and spawn the user's shell in it.
+//!
+//! Also sets up clickable URL matching (ported from gnome-terminal's
+//! terminal-regex.hh patterns).
+
+use std::path::Path;
+
+use gtk::{gio, glib};
+use gtk4 as gtk;
+use vte4::prelude::*;
+
+use crate::config::{Config, CursorBlinkSetting};
+
+/// URL regex patterns ported from gnome-terminal.
+/// These detect http(s), ftp, file, voip, and bare www/ftp hostnames,
+/// as well as email addresses.
+const URL_REGEX_PATTERNS: &[&str] = &[
+    // scheme://… (http, https, ftp, ftps, sftp, …)
+    r#"(?i)(https?|ftps?|sftp|webcal|telnet|nntp|news)://[^\s<>"'(){}\[\]]+[^\s<>"'(){}\[\].,;:!?)]"#,
+    // file:///…
+    r#"(?i)file:///[^\s<>"']+"#,
+    // www.host… (bare, no scheme)
+    r#"(?i)\bwww\.[a-z0-9][-a-z0-9]*(\.[a-z0-9][-a-z0-9]*)+(/[^\s<>"']*)?"#,
+    // ftp.host… (bare, no scheme)
+    r#"(?i)\bftp\.[a-z0-9][-a-z0-9]*(\.[a-z0-9][-a-z0-9]*)+(/[^\s<>"']*)?"#,
+    // email addresses
+    r"(?i)\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b",
+];
+
+/// Create a fully configured `vte4::Terminal` with the user's theme applied,
+/// URL matching registered, and the login shell already spawned.
+#[allow(dead_code)]
+pub fn build_terminal(config: &Config) -> vte4::Terminal {
+    build_terminal_in(config, None)
+}
+
+/// Like [`build_terminal`], spawning the shell in `cwd` when given.
+pub fn build_terminal_in(config: &Config, cwd: Option<&Path>) -> vte4::Terminal {
+    build_terminal_with_command(config, cwd, None)
+}
+
+/// Spawn `command` (for example `btop`) instead of the login shell.
+pub fn build_terminal_with_command(
+    config: &Config,
+    cwd: Option<&Path>,
+    command: Option<&[String]>,
+) -> vte4::Terminal {
+    let terminal = vte4::Terminal::new();
+    terminal.set_hexpand(true);
+    terminal.set_vexpand(true);
+    terminal.set_can_focus(true);
+    terminal.set_focusable(true);
+    terminal.set_input_enabled(true);
+    terminal.set_bold_is_bright(true);
+    apply_settings(&terminal, config);
+
+    let palette = config.palette_rgba();
+    let palette_refs: Vec<&gtk::gdk::RGBA> = palette.iter().collect();
+    terminal.set_colors(
+        Some(&config.foreground_rgba()),
+        Some(&config.background_rgba()),
+        &palette_refs,
+    );
+
+    register_url_patterns(&terminal);
+    spawn_process(&terminal, cwd, command);
+    terminal
+}
+
+/// Apply preference settings (font, scrollback, cursor, …) to an existing terminal.
+pub fn apply_settings(terminal: &vte4::Terminal, config: &Config) {
+    if config.use_custom_font && !config.font.trim().is_empty() {
+        let font = gtk::pango::FontDescription::from_string(&config.font);
+        terminal.set_font(Some(&font));
+    } else {
+        terminal.set_font(None);
+    }
+
+    terminal.set_cell_width_scale(config.cell_width_scale.clamp(0.5, 4.0));
+    terminal.set_cell_height_scale(config.cell_height_scale.clamp(0.5, 4.0));
+
+    let scrollback = if config.limit_scrollback {
+        config.scrollback_lines.max(0)
+    } else {
+        -1
+    };
+    terminal.set_scrollback_lines(scrollback);
+
+    terminal.set_mouse_autohide(true);
+    terminal.set_scroll_on_output(config.scroll_on_output);
+    terminal.set_scroll_on_keystroke(config.scroll_on_keystroke);
+    terminal.set_scroll_on_insert(config.scroll_on_paste);
+    terminal.set_allow_hyperlink(true);
+    terminal.set_audible_bell(config.audible_bell);
+
+    terminal.set_cursor_blink_mode(match config.cursor_blink_mode {
+        CursorBlinkSetting::System => vte4::CursorBlinkMode::System,
+        CursorBlinkSetting::On => vte4::CursorBlinkMode::On,
+        CursorBlinkSetting::Off => vte4::CursorBlinkMode::Off,
+    });
+
+    terminal.set_cursor_shape(match config.cursor_shape.to_ascii_lowercase().as_str() {
+        "ibeam" | "i-beam" => vte4::CursorShape::Ibeam,
+        "underline" => vte4::CursorShape::Underline,
+        _ => vte4::CursorShape::Block,
+    });
+
+    terminal.set_text_blink_mode(match config.text_blink.to_ascii_lowercase().as_str() {
+        "never" => vte4::TextBlinkMode::Never,
+        "focused" => vte4::TextBlinkMode::Focused,
+        "unfocused" => vte4::TextBlinkMode::Unfocused,
+        _ => vte4::TextBlinkMode::Always,
+    });
+}
+
+/// Recolor an existing terminal to match a built-in profile (leaves font as-is).
+pub fn apply_profile(terminal: &vte4::Terminal, profile: &gtk_theme::Profile) {
+    let palette = profile.palette_rgba();
+    let palette_refs: Vec<&gtk::gdk::RGBA> = palette.iter().collect();
+    terminal.set_colors(
+        Some(&profile.foreground_rgba()),
+        Some(&profile.background_rgba()),
+        &palette_refs,
+    );
+}
+
+/// Register URL regex patterns so VTE highlights them and
+/// `check_match_at()` can find them for Ctrl+click.
+fn register_url_patterns(terminal: &vte4::Terminal) {
+    // PCRE2_MULTILINE is required by VTE for match regexes
+    const PCRE2_MULTILINE: u32 = 0x0000_0400;
+
+    for pattern in URL_REGEX_PATTERNS {
+        match vte4::Regex::for_match(pattern, PCRE2_MULTILINE) {
+            Ok(re) => {
+                let tag = terminal.match_add_regex(&re, 0);
+                terminal.match_set_cursor_name(tag, "pointer");
+            }
+            Err(e) => {
+                eprintln!("gtk-term: bad URL regex: {e}");
+            }
+        }
+    }
+}
+
+fn spawn_process(terminal: &vte4::Terminal, cwd: Option<&Path>, command: Option<&[String]>) {
+    // Custom commands (btop, …) stay untouched. The interactive shell gets a
+    // git-aware `ls` so dirty folders use the same blue/orange/red as gtk-files.
+    let (argv, integration_env): (Vec<String>, Vec<(String, String)>) = match command {
+        Some(cmd) if !cmd.is_empty() => (cmd.to_vec(), Vec::new()),
+        _ => {
+            let launch = crate::git_ls::interactive_shell();
+            (launch.argv, launch.env)
+        }
+    };
+    let dir = cwd
+        .filter(|p| p.is_dir())
+        .map(|p| p.to_string_lossy().into_owned())
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .filter(|p| p.is_dir())
+                .map(|p| p.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/".to_string()));
+
+    // Interactive so bash/zsh print PS1. An empty envv is NOT “inherit” in VTE —
+    // it is a blank environment, which starts a non-interactive shell with no prompt.
+    let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+
+    let mut env_owned: Vec<String> = std::env::vars().map(|(k, v)| format!("{k}={v}")).collect();
+    upsert_env(&mut env_owned, "TERM", "xterm-256color");
+    upsert_env(&mut env_owned, "COLORTERM", "truecolor");
+    env_owned.retain(|e| !e.eq_ignore_ascii_case("NO_COLOR") && !e.starts_with("NO_COLOR="));
+    for (key, value) in &integration_env {
+        upsert_env(&mut env_owned, key, value);
+    }
+    let env_refs: Vec<&str> = env_owned.iter().map(String::as_str).collect();
+
+    let term = terminal.clone();
+    terminal.spawn_async(
+        vte4::PtyFlags::DEFAULT,
+        Some(&dir),
+        &argv_refs,
+        &env_refs,
+        glib::SpawnFlags::DEFAULT,
+        || {},
+        -1,
+        gio::Cancellable::NONE,
+        move |result| {
+            if let Err(err) = result {
+                let msg = format!("gtk-term: failed to spawn shell: {err}\r\n");
+                eprintln!("{}", msg.trim_end());
+                term.feed(msg.as_bytes());
+            }
+        },
+    );
+}
+
+fn upsert_env(env: &mut Vec<String>, key: &str, value: &str) {
+    let prefix = format!("{key}=");
+    if let Some(entry) = env.iter_mut().find(|e| e.starts_with(&prefix)) {
+        *entry = format!("{prefix}{value}");
+    } else {
+        env.push(format!("{prefix}{value}"));
+    }
+}
