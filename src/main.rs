@@ -174,8 +174,6 @@ fn show_about(app: &gtk::Application) {
             "gtk-term standalone terminal application, in Rust that provides a themeable VTE terminal emulator.",
         )
         .authors(["Created by Kevin Hinds"])
-        .website("https://github.com/NeuronixOS/GTK-Apps")
-        .website_label("github.com/NeuronixOS/GTK-Apps")
         .license_type(gtk::License::MitX11)
         .build();
     if let Some(win) = app.active_window() {
