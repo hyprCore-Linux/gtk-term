@@ -31,7 +31,7 @@ use vte4::prelude::*;
 
 use config::Config;
 
-const APP_ID: &str = "org.neuronix.GtkTerm";
+const APP_ID: &str = "org.hyprcore.GtkTerm";
 
 #[derive(Clone, Debug)]
 struct LaunchOpts {
@@ -195,7 +195,7 @@ fn normalize_app_id(raw: &str) -> String {
     if s.contains('.') {
         s.to_string()
     } else {
-        format!("org.neuronix.{s}")
+        format!("org.hyprcore.{s}")
     }
 }
 
