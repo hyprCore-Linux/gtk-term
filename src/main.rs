@@ -282,6 +282,28 @@ fn parse_launch_opts(args: &[OsString]) -> LaunchOpts {
 
 const SPAWN_CWD_KEY: &str = "gtk-term-spawn-cwd";
 const SPAWN_CMD_KEY: &str = "gtk-term-spawn-cmd";
+const REVEAL_KEY: &str = "gtk-term-reveal-menubar";
+
+fn store_reveal(window: &gtk::ApplicationWindow, reveal: gtk_theme::RevealMenubar) {
+    unsafe {
+        window.set_data(REVEAL_KEY, reveal);
+    }
+}
+
+/// Left brand stays "GTK Term"; center shows the shell/tab title.
+fn set_window_and_content_title(window: &gtk::ApplicationWindow, title: &str) {
+    window.set_title(Some(title));
+    let content = if title.is_empty() || title == "GTK Term" || title == "Terminal" {
+        ""
+    } else {
+        title
+    };
+    unsafe {
+        if let Some(reveal) = window.data::<gtk_theme::RevealMenubar>(REVEAL_KEY) {
+            reveal.as_ref().set_content_title(content);
+        }
+    }
+}
 
 fn set_window_cwd(window: &gtk::ApplicationWindow, cwd: Option<PathBuf>) {
     if let Some(dir) = cwd {
@@ -326,7 +348,7 @@ fn build_ui(app: &gtk::Application, opts: LaunchOpts) {
     set_window_cwd(&window, opts.cwd);
     set_window_command(&window, opts.command);
     if let Some(title) = opts.title.as_deref().filter(|t| !t.is_empty()) {
-        window.set_title(Some(title));
+        set_window_and_content_title(&window, title);
     }
 
     create_tab(&window, &notebook, &cfg.borrow());
@@ -400,7 +422,7 @@ fn build_ui_with_existing_tab(
     refresh_zoom_label(&notebook, &zoom_label);
     if let Some(term) = current_terminal(&notebook) {
         if let Some(title) = term.window_title().filter(|t| !t.is_empty()) {
-            window.set_title(Some(title.as_str()));
+            set_window_and_content_title(&window, title.as_str());
         }
     }
     apply_profile_to_notebook(&notebook, gtk_theme::load_profile());
@@ -431,23 +453,44 @@ fn build_window_shell(
     main_box.append(&find_revealer);
     main_box.append(&notebook);
 
-    let header = gtk::HeaderBar::new();
-    gtk_theme::prepare_headerbar(&header);
-
-    let new_tab_btn = gtk::Button::from_icon_name("tab-new-symbolic");
-    new_tab_btn.set_tooltip_text(Some("New Tab (Ctrl+Shift+T)"));
-    header.pack_start(&new_tab_btn);
-
-    let zoom_label = gtk::Label::new(Some("100%"));
-    let menu_button = build_menu_button(&zoom_label, &notebook);
-    header.pack_end(&menu_button);
-
     let window = gtk::ApplicationWindow::builder()
         .application(app)
         .title("GTK Term")
         .default_width(state.window_width)
         .default_height(state.window_height)
         .build();
+
+    let header = gtk::HeaderBar::new();
+
+    let zoom_label = gtk::Label::new(Some("100%"));
+    let (menu_model, menu_icons, zoom_box) = build_menu_model(&zoom_label);
+    let reveal_menubar = gtk_theme::install_reveal_menubar(
+        &header,
+        &window,
+        "GTK Term",
+        &menu_model,
+        Some(&menu_icons),
+    );
+    store_reveal(&window, reveal_menubar.clone());
+    // Custom zoom widget lives in the View submenu of the menubar.
+    reveal_menubar.menubar().add_child(&zoom_box, "zoom");
+    {
+        let notebook_weak = notebook.downgrade();
+        let zoom_label = zoom_label.clone();
+        reveal_menubar.hamburger().connect_toggled(move |btn| {
+            if btn.is_active() {
+                if let Some(notebook) = notebook_weak.upgrade() {
+                    refresh_zoom_label(&notebook, &zoom_label);
+                }
+            }
+        });
+    }
+
+    let new_tab_btn = gtk::Button::from_icon_name("tab-new-symbolic");
+    new_tab_btn.set_tooltip_text(Some("New Tab (Ctrl+Shift+T)"));
+    header.pack_start(&new_tab_btn);
+    reveal_menubar.pack_controls(&header);
+
     if apply_saved_maximize && state.maximized {
         window.maximize();
     }
@@ -495,7 +538,7 @@ fn build_window_shell(
                     .map(|t| t.to_string())
                     .filter(|t| !t.is_empty())
                     .unwrap_or_else(|| "GTK Term".to_string());
-                window.set_title(Some(&title));
+                set_window_and_content_title(&window, &title);
             }
         });
     }
@@ -547,35 +590,34 @@ fn save_window_state(window: &gtk::ApplicationWindow, notebook: &gtk::Notebook) 
     config::save_state(&state);
 }
 
-fn build_menu_button(zoom_label: &gtk::Label, notebook: &gtk::Notebook) -> gtk::MenuButton {
+fn build_menu_model(zoom_label: &gtk::Label) -> (gio::Menu, gtk_theme::IconMenu, gtk::Box) {
     let mut icons = gtk_theme::IconMenu::new();
     let menu = gio::Menu::new();
 
-    // Zoom row (custom widget).
+    // Terminal: windows, tab title, read-only, preferences.
+    let terminal = gio::Menu::new();
+    icons.append_action(&terminal, "New Window", "app.new-window");
+    icons.append_action(&terminal, "Set Title…", "win.set-title");
+    icons.append_action(&terminal, "Read-Only", "win.read-only");
+    icons.append_action(&terminal, "Preferences…", "win.preferences");
+    icons.append_submenu(&menu, "_Terminal", &terminal, "utilities-terminal-symbolic");
+
+    // View: custom zoom row + full screen.
+    let view = gio::Menu::new();
     let zoom_section = gio::Menu::new();
     let zoom_item = gio::MenuItem::new(None, None);
     zoom_item.set_attribute_value("custom", Some(&"zoom".to_variant()));
     zoom_section.append_item(&zoom_item);
-    menu.append_section(None, &zoom_section);
+    view.append_section(None, &zoom_section);
+    let view_actions = gio::Menu::new();
+    icons.append_action(&view_actions, "Full Screen", "win.fullscreen");
+    view.append_section(None, &view_actions);
+    icons.append_submenu(&menu, "_View", &view, "view-grid-symbolic");
 
-    // Window / full screen.
-    let window_section = gio::Menu::new();
-    icons.append_action(&window_section, "New Window", "app.new-window");
-    icons.append_action(&window_section, "Full Screen", "win.fullscreen");
-    menu.append_section(None, &window_section);
+    // Profile submenu (shared suite themes) — appended as top-level "Profile".
+    gtk_theme::append_profile_menu(&menu, "win.theme");
 
-    // Read-only toggle.
-    let ro_section = gio::Menu::new();
-    icons.append_action(&ro_section, "Read-Only", "win.read-only");
-    icons.append_action(&ro_section, "Set Title…", "win.set-title");
-    menu.append_section(None, &ro_section);
-
-    // Profiles submenu (shared suite themes).
-    let profiles_section = gio::Menu::new();
-    gtk_theme::append_profile_menu(&profiles_section, "win.theme");
-    menu.append_section(None, &profiles_section);
-
-    // Advanced submenu (reset, size presets).
+    // Advanced: reset + size presets.
     let advanced_menu = gio::Menu::new();
 
     let reset_section = gio::Menu::new();
@@ -597,26 +639,16 @@ fn build_menu_button(zoom_label: &gtk::Label, notebook: &gtk::Notebook) -> gtk::
         size_section.append_item(&item);
     }
     advanced_menu.append_section(None, &size_section);
-
-    let advanced_section = gio::Menu::new();
     icons.append_submenu(
-        &advanced_section,
-        "Advanced",
+        &menu,
+        "_Advanced",
         &advanced_menu,
         "preferences-system-symbolic",
     );
-    menu.append_section(None, &advanced_section);
 
-    let prefs_section = gio::Menu::new();
-    icons.append_action(&prefs_section, "Preferences…", "win.preferences");
-    icons.append_action(&prefs_section, "About", "app.about");
-    menu.append_section(None, &prefs_section);
-
-    let menu_button = gtk::MenuButton::new();
-    menu_button.set_icon_name("open-menu-symbolic");
-    menu_button.set_tooltip_text(Some("Menu"));
-    menu_button.set_menu_model(Some(&menu));
-    icons.bind_menu_button(&menu_button);
+    let help = gio::Menu::new();
+    icons.append_action(&help, "About", "app.about");
+    icons.append_submenu(&menu, "_Help", &help, "help-about-symbolic");
 
     // Custom zoom row.
     let zoom_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -645,20 +677,7 @@ fn build_menu_button(zoom_label: &gtk::Label, notebook: &gtk::Notebook) -> gtk::
     zoom_box.append(&zoom_reset);
     zoom_box.append(&zoom_in);
 
-    if let Some(popover) = menu_button.popover().and_downcast::<gtk::PopoverMenu>() {
-        popover.add_child(&zoom_box, "zoom");
-        let notebook_weak = notebook.downgrade();
-        let zoom_label = zoom_label.clone();
-        popover.connect_visible_notify(move |pop| {
-            if pop.is_visible() {
-                if let Some(notebook) = notebook_weak.upgrade() {
-                    refresh_zoom_label(&notebook, &zoom_label);
-                }
-            }
-        });
-    }
-
-    menu_button
+    (menu, icons, zoom_box)
 }
 
 // ---------------------------------------------------------------------------
@@ -1288,7 +1307,7 @@ fn attach_existing_tab(
                 scroller_weak.upgrade(),
             ) {
                 if notebook.current_page() == notebook.page_num(&scroller) {
-                    window.set_title(Some(&title));
+                    set_window_and_content_title(&window, &title);
                 }
             }
         });
@@ -1663,14 +1682,20 @@ fn show_set_title_dialog(window: &gtk::ApplicationWindow, notebook: &gtk::Notebo
                                             label.set_text(&shell_title);
                                             label.set_tooltip_text(Some(&shell_title));
                                             if let Some(window) = window_weak.upgrade() {
-                                                window.set_title(Some(&shell_title));
+                                                set_window_and_content_title(
+                                                    &window,
+                                                    &shell_title,
+                                                );
                                             }
                                         } else {
                                             label.set_text(&new_title);
                                             label.set_tooltip_text(Some(&new_title));
                                             label.set_widget_name("custom-title");
                                             if let Some(window) = window_weak.upgrade() {
-                                                window.set_title(Some(&new_title));
+                                                set_window_and_content_title(
+                                                    &window,
+                                                    &new_title,
+                                                );
                                             }
                                         }
                                     }
