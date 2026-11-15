@@ -3,11 +3,16 @@
 //! The live path is a bash script ([`git_ls_lib.bash`](git_ls_lib.bash)) so
 //! `ls` does not start this GTK binary. The classifier here is the same
 //! mapping gtk-files uses, and the unit tests lock both sides to it.
+//!
+//! Coloring is off by default. Each window owns a small state file under
+//! `~/.cache/gtk-term/git-ls-state/`; the titlebar toggle writes `0`/`1` and
+//! interactive shells read it via `GTK_TERM_GIT_LS_STATE` on every `ls`.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const LIB_SCRIPT: &str = include_str!("git_ls_lib.bash");
 const HOOK_TEMPLATE: &str = include_str!("git_ls_hook.sh");
@@ -16,6 +21,27 @@ const HOOK_TEMPLATE: &str = include_str!("git_ls_hook.sh");
 pub struct ShellLaunch {
     pub argv: Vec<String>,
     pub env: Vec<(String, String)>,
+}
+
+/// Create a per-window gate file (`0` = off). The titlebar toggle rewrites it.
+pub fn create_window_state_file() -> io::Result<PathBuf> {
+    let dir = dirs::cache_dir()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no cache dir"))?
+        .join("gtk-term")
+        .join("git-ls-state");
+    fs::create_dir_all(&dir)?;
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = dir.join(format!("{}-{}", std::process::id(), nanos));
+    fs::write(&path, b"0\n")?;
+    Ok(path)
+}
+
+/// Persist the titlebar toggle so live shells pick it up on the next `ls`.
+pub fn write_window_state(path: &Path, enabled: bool) -> io::Result<()> {
+    fs::write(path, if enabled { b"1\n" as &[u8] } else { b"0\n" })
 }
 
 /// Name-label color: blue / orange / red. Severity increases with the variant.
@@ -559,10 +585,19 @@ printf '%s\n' "${{COLORS[sub]}}" "${{COLORS[other]}}"
         assert_eq!(bash.argv[1], "--rcfile");
         assert!(bash.argv[2].ends_with("git-ls.bashrc"));
         assert_eq!(bash.argv[3], "-i");
-        let rc = fs::read_to_string(&bash.argv[3]).unwrap();
+        let rc = fs::read_to_string(&bash.argv[2]).unwrap();
         assert!(rc.contains("/etc/bash.bashrc"));
         assert!(rc.contains(".bashrc"));
         assert!(bash.env.is_empty());
+        let hook = fs::read_to_string(cache.join("git-ls-hook.sh")).unwrap();
+        assert!(
+            hook.contains("GTK_TERM_GIT_LS_STATE"),
+            "hook should gate on per-window state file"
+        );
+        assert!(
+            !hook.contains(r#"GTK_TERM_GIT_LS:-1"#),
+            "hook must default git colors off, not on"
+        );
 
         let zsh = install_into(&cache, Path::new("/bin/zsh"), "zsh").unwrap();
         assert_eq!(zsh.argv, vec!["/bin/zsh".to_string(), "-i".into()]);

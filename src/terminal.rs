@@ -36,14 +36,18 @@ pub fn build_terminal(config: &Config) -> vte4::Terminal {
 
 /// Like [`build_terminal`], spawning the shell in `cwd` when given.
 pub fn build_terminal_in(config: &Config, cwd: Option<&Path>) -> vte4::Terminal {
-    build_terminal_with_command(config, cwd, None)
+    build_terminal_with_command(config, cwd, None, None)
 }
 
 /// Spawn `command` (for example `btop`) instead of the login shell.
+///
+/// `git_ls_state` is the per-window gate file path for git folder colors
+/// (`GTK_TERM_GIT_LS_STATE`). Ignored for custom `-e` commands.
 pub fn build_terminal_with_command(
     config: &Config,
     cwd: Option<&Path>,
     command: Option<&[String]>,
+    git_ls_state: Option<&Path>,
 ) -> vte4::Terminal {
     let terminal = vte4::Terminal::new();
     terminal.set_hexpand(true);
@@ -63,7 +67,7 @@ pub fn build_terminal_with_command(
     );
 
     register_url_patterns(&terminal);
-    spawn_process(&terminal, cwd, command);
+    spawn_process(&terminal, cwd, command, git_ls_state);
     terminal
 }
 
@@ -143,9 +147,15 @@ fn register_url_patterns(terminal: &vte4::Terminal) {
     }
 }
 
-fn spawn_process(terminal: &vte4::Terminal, cwd: Option<&Path>, command: Option<&[String]>) {
-    // Custom commands (btop, …) stay untouched. The interactive shell gets a
-    // git-aware `ls` so dirty folders use the same blue/orange/red as gtk-files.
+fn spawn_process(
+    terminal: &vte4::Terminal,
+    cwd: Option<&Path>,
+    command: Option<&[String]>,
+    git_ls_state: Option<&Path>,
+) {
+    // Custom commands (btop, …) stay untouched. Interactive shells get the
+    // git-aware `ls` wrapper; coloring stays off until the titlebar toggle
+    // writes `1` into the per-window state file.
     let (argv, integration_env): (Vec<String>, Vec<(String, String)>) = match command {
         Some(cmd) if !cmd.is_empty() => (cmd.to_vec(), Vec::new()),
         _ => {
@@ -171,9 +181,27 @@ fn spawn_process(terminal: &vte4::Terminal, cwd: Option<&Path>, command: Option<
     let mut env_owned: Vec<String> = std::env::vars().map(|(k, v)| format!("{k}={v}")).collect();
     upsert_env(&mut env_owned, "TERM", "xterm-256color");
     upsert_env(&mut env_owned, "COLORTERM", "truecolor");
-    env_owned.retain(|e| !e.eq_ignore_ascii_case("NO_COLOR") && !e.starts_with("NO_COLOR="));
+    // Drop inherited ls-wrap markers so a shell launched from inside gtk-term
+    // still gets a fresh hook (and can honor this window's state file).
+    env_owned.retain(|e| {
+        !e.eq_ignore_ascii_case("NO_COLOR")
+            && !e.starts_with("NO_COLOR=")
+            && !e.starts_with("GTK_TERM_LS_WRAPPED=")
+            && !e.starts_with("GTK_TERM_LS_EXTRA=")
+            && !e.starts_with("GTK_TERM_GIT_LS_STATE=")
+    });
     for (key, value) in &integration_env {
         upsert_env(&mut env_owned, key, value);
+    }
+    // Only for interactive shells (integration_env path / empty custom cmd).
+    if command.map(|c| c.is_empty()).unwrap_or(true) {
+        if let Some(path) = git_ls_state {
+            upsert_env(
+                &mut env_owned,
+                "GTK_TERM_GIT_LS_STATE",
+                &path.to_string_lossy(),
+            );
+        }
     }
     let env_refs: Vec<&str> = env_owned.iter().map(String::as_str).collect();
 

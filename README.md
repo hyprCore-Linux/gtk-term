@@ -16,6 +16,7 @@ Created by Kevin Hinds
 - Terminal size presets (80×24, 80×43, 132×24, 132×43)
 - Confirm-close dialog for windows/tabs with running processes
 - Menu with zoom, fullscreen, read-only, profiles, and advanced options
+- Titlebar “Git Colors” switch for git folder colors on `ls`/`l` (session-only, default off)
 - Colors, font, scrollback, and cursor blink from a simple TOML file
 - GTK chrome (window / header bar / tabs) themeable with CSS
 
@@ -101,6 +102,7 @@ Then launch it as `gtk-term` from anywhere.
 | `Ctrl+-`                   | Zoom out                       |
 | `Ctrl+0`                   | Reset zoom                     |
 | `F11`                      | Toggle full screen              |
+| `Ctrl+G`                   | Toggle Git Colors              |
 | `Ctrl+click` on link       | Open URL in browser            |
 | Right-click                | Context menu                   |
 
@@ -112,6 +114,7 @@ The header-bar menu (☰) contains:
 - **New Window** — open another terminal window
 - **Full Screen** — toggle fullscreen (also `F11`)
 - **Read-Only** — disable keyboard input to the current terminal
+- **Git Colors** — color dirty folders in `ls`/`l` (titlebar switch / `Ctrl+G`; off each open)
 - **Set Title…** — rename the current tab
 - **Profile** — switch the current terminal to a prebuilt color scheme:
   Tokyo Night, Dracula, Nord, Gruvbox Dark, Solarized Dark, Solarized Light

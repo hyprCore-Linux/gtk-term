@@ -12,7 +12,7 @@
 //!   - Reset / Reset+Clear
 //!   - Terminal size presets (80×24, 80×43, 132×24, 132×43)
 //!   - Confirm-close dialog for tabs/windows with child processes
-//!   - Zoom, fullscreen, read-only, built-in color profiles
+//!   - Zoom, fullscreen, read-only, git folder colors toggle, built-in color profiles
 
 mod config;
 mod git_ls;
@@ -111,6 +111,7 @@ fn main() -> glib::ExitCode {
 
     // Window
     app.set_accels_for_action("win.fullscreen", &["F11"]);
+    app.set_accels_for_action("win.git-ls-colors", &["<Ctrl>g"]);
     app.set_accels_for_action("app.new-window", &["<Ctrl><Shift>n"]);
 
     let prog = argv
@@ -283,10 +284,25 @@ fn parse_launch_opts(args: &[OsString]) -> LaunchOpts {
 const SPAWN_CWD_KEY: &str = "gtk-term-spawn-cwd";
 const SPAWN_CMD_KEY: &str = "gtk-term-spawn-cmd";
 const REVEAL_KEY: &str = "gtk-term-reveal-menubar";
+const GIT_LS_STATE_KEY: &str = "gtk-term-git-ls-state";
 
 fn store_reveal(window: &gtk::ApplicationWindow, reveal: gtk_theme::RevealMenubar) {
     unsafe {
         window.set_data(REVEAL_KEY, reveal);
+    }
+}
+
+fn store_git_ls_state(window: &gtk::ApplicationWindow, path: PathBuf) {
+    unsafe {
+        window.set_data(GIT_LS_STATE_KEY, path);
+    }
+}
+
+fn window_git_ls_state(window: &gtk::ApplicationWindow) -> Option<PathBuf> {
+    unsafe {
+        window
+            .data::<PathBuf>(GIT_LS_STATE_KEY)
+            .map(|p| p.as_ref().clone())
     }
 }
 
@@ -489,7 +505,42 @@ fn build_window_shell(
     let new_tab_btn = gtk::Button::from_icon_name("tab-new-symbolic");
     new_tab_btn.set_tooltip_text(Some("New Tab (Ctrl+Shift+T)"));
     header.pack_start(&new_tab_btn);
+
+    // Session-only git folder colors (default off). pack_end: first = rightmost.
+    // Label + Switch (left/right slider) bound to win.git-ls-colors.
+    let git_ls_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    git_ls_row.set_valign(gtk::Align::Center);
+    // Hover helper: explain what the switch does (normal ls colors always stay on).
+    const GIT_LS_HELP: &str = "Show folder git changes in colors (Ctrl+G)";
+    git_ls_row.set_tooltip_text(Some(GIT_LS_HELP));
+    let git_ls_label = gtk::Label::new(Some("Git Colors"));
+    git_ls_label.add_css_class("dim-label");
+    git_ls_label.set_tooltip_text(Some(GIT_LS_HELP));
+    let git_ls_switch = gtk::Switch::new();
+    git_ls_switch.set_valign(gtk::Align::Center);
+    git_ls_switch.set_tooltip_text(Some(GIT_LS_HELP));
+    git_ls_switch.set_action_name(Some("win.git-ls-colors"));
+    git_ls_row.append(&git_ls_label);
+    git_ls_row.append(&git_ls_switch);
+    header.pack_end(&git_ls_row);
+
     reveal_menubar.pack_controls(&header);
+
+    let git_ls_state = match git_ls::create_window_state_file() {
+        Ok(path) => {
+            store_git_ls_state(&window, path.clone());
+            Some(path)
+        }
+        Err(err) => {
+            eprintln!("gtk-term: git ls state file unavailable: {err}");
+            None
+        }
+    };
+    if let Some(path) = git_ls_state.clone() {
+        window.connect_destroy(move |_| {
+            let _ = std::fs::remove_file(&path);
+        });
+    }
 
     if apply_saved_maximize && state.maximized {
         window.maximize();
@@ -510,7 +561,10 @@ fn build_window_shell(
         Rc::clone(&cfg),
         &zoom_label,
         &find_revealer,
+        git_ls_state,
     );
+    // VTE eats plain Ctrl+letter; capture Ctrl+G before it reaches the PTY.
+    install_git_ls_shortcut(&window);
 
     {
         let window_weak = window.downgrade();
@@ -599,6 +653,7 @@ fn build_menu_model(zoom_label: &gtk::Label) -> (gio::Menu, gtk_theme::IconMenu,
     icons.append_action(&terminal, "New Window", "app.new-window");
     icons.append_action(&terminal, "Set Title…", "win.set-title");
     icons.append_action(&terminal, "Read-Only", "win.read-only");
+    icons.append_action(&terminal, "Git Colors", "win.git-ls-colors");
     icons.append_action(&terminal, "Preferences…", "win.preferences");
     icons.append_submenu(&menu, "_Terminal", &terminal, "utilities-terminal-symbolic");
 
@@ -690,6 +745,7 @@ fn install_actions(
     cfg: Rc<RefCell<Config>>,
     zoom_label: &gtk::Label,
     find_revealer: &gtk::Revealer,
+    git_ls_state: Option<PathBuf>,
 ) {
     // ---- new-tab ----
     let act_new = gio::SimpleAction::new("new-tab", None);
@@ -1014,6 +1070,22 @@ fn install_actions(
     }
     window.add_action(&act_ro);
 
+    // ---- git folder colors (session-only; default off; Ctrl+G) ----
+    let act_git_ls = gio::SimpleAction::new_stateful("git-ls-colors", None, &false.to_variant());
+    {
+        let state_path = git_ls_state;
+        act_git_ls.connect_change_state(move |action, state| {
+            let active = state.and_then(|s| s.get::<bool>()).unwrap_or(false);
+            if let Some(path) = state_path.as_ref() {
+                if let Err(err) = git_ls::write_window_state(path, active) {
+                    eprintln!("gtk-term: failed to write git ls state: {err}");
+                }
+            }
+            action.set_state(&active.to_variant());
+        });
+    }
+    window.add_action(&act_git_ls);
+
     // ---- theme / profile (stateful string; shared across gtk-* apps) ----
     let act_theme = gio::SimpleAction::new_stateful(
         "theme",
@@ -1112,6 +1184,34 @@ fn current_terminal(notebook: &gtk::Notebook) -> Option<vte4::Terminal> {
 // Tab management.
 // ---------------------------------------------------------------------------
 
+/// Capture Ctrl+G on the window so VTE does not send BEL / readline abort.
+fn install_git_ls_shortcut(window: &gtk::ApplicationWindow) {
+    let key = gtk::EventControllerKey::new();
+    key.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let window_weak = window.downgrade();
+    key.connect_key_pressed(move |_, keyval, _keycode, modifiers| {
+        let interesting = gdk::ModifierType::CONTROL_MASK
+            | gdk::ModifierType::ALT_MASK
+            | gdk::ModifierType::SHIFT_MASK
+            | gdk::ModifierType::SUPER_MASK;
+        let mods = modifiers.intersection(interesting);
+        if mods != gdk::ModifierType::CONTROL_MASK {
+            return glib::Propagation::Proceed;
+        }
+        if keyval != gdk::Key::g && keyval != gdk::Key::G {
+            return glib::Propagation::Proceed;
+        }
+        let Some(win) = window_weak.upgrade() else {
+            return glib::Propagation::Proceed;
+        };
+        if let Some(action) = win.lookup_action("git-ls-colors") {
+            action.activate(None);
+        }
+        glib::Propagation::Stop
+    });
+    window.add_controller(key);
+}
+
 pub(crate) fn create_tab(
     window: &gtk::ApplicationWindow,
     notebook: &gtk::Notebook,
@@ -1119,8 +1219,13 @@ pub(crate) fn create_tab(
 ) {
     let cwd = window_cwd(window);
     let command = take_window_command(window);
-    let terminal =
-        terminal::build_terminal_with_command(config, cwd.as_deref(), command.as_deref());
+    let git_ls_state = window_git_ls_state(window);
+    let terminal = terminal::build_terminal_with_command(
+        config,
+        cwd.as_deref(),
+        command.as_deref(),
+        git_ls_state.as_deref(),
+    );
     terminal::apply_profile(&terminal, gtk_theme::load_profile());
 
     let scroller = gtk::ScrolledWindow::builder()
