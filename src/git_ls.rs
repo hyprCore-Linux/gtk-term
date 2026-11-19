@@ -4,9 +4,10 @@
 //! `ls` does not start this GTK binary. The classifier here is the same
 //! mapping gtk-files uses, and the unit tests lock both sides to it.
 //!
-//! Coloring is off by default. Each window owns a small state file under
-//! `~/.cache/gtk-term/git-ls-state/`; the titlebar toggle writes `0`/`1` and
-//! interactive shells read it via `GTK_TERM_GIT_LS_STATE` on every `ls`.
+//! The Terminal menu shows or hides the titlebar switch. The switch has its
+//! own remembered on/off. This window's state file under
+//! `~/.cache/gtk-term/git-ls-state/` is `1` only when the switch is shown and
+//! on. Interactive shells read it via `GTK_TERM_GIT_LS_STATE` on every `ls`.
 
 use std::collections::BTreeMap;
 use std::fs;

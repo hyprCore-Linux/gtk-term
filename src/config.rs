@@ -36,6 +36,12 @@ pub struct Config {
     pub scroll_on_output: bool,
     pub scroll_on_keystroke: bool,
     pub scroll_on_paste: bool,
+    /// When true, the titlebar Git Colors switch is shown. Off until the user
+    /// enables it from the Terminal menu. Does not change whether colors are on.
+    pub git_colors: bool,
+    /// Remembered position of the titlebar switch. Kept even while the switch
+    /// is hidden, so turning the switch off is not the same as hiding it.
+    pub git_colors_enabled: bool,
     /// When false, scrollback is unlimited (`-1` in VTE).
     pub limit_scrollback: bool,
     /// Lines of scrollback history when `limit_scrollback` is true.
@@ -140,6 +146,8 @@ impl Default for Config {
             scroll_on_output: false,
             scroll_on_keystroke: true,
             scroll_on_paste: true,
+            git_colors: false,
+            git_colors_enabled: false,
             limit_scrollback: true,
             scrollback_lines: 10_000,
             colors: Colors::default(),

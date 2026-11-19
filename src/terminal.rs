@@ -154,7 +154,7 @@ fn spawn_process(
     git_ls_state: Option<&Path>,
 ) {
     // Custom commands (btop, …) stay untouched. Interactive shells get the
-    // git-aware `ls` wrapper; coloring stays off until the titlebar toggle
+    // git-aware `ls` wrapper; coloring stays off until the titlebar switch
     // writes `1` into the per-window state file.
     let (argv, integration_env): (Vec<String>, Vec<(String, String)>) = match command {
         Some(cmd) if !cmd.is_empty() => (cmd.to_vec(), Vec::new()),
