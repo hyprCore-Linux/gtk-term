@@ -524,6 +524,13 @@ fn build_window_shell(
     git_ls_row.append(&git_ls_label);
     git_ls_row.append(&git_ls_switch);
     header.pack_end(&git_ls_row);
+    {
+        let row = git_ls_row.clone();
+        let cfg_menu = Rc::clone(&cfg);
+        reveal_menubar.hamburger().connect_toggled(move |btn| {
+            row.set_visible(btn.is_active() && cfg_menu.borrow().git_colors);
+        });
+    }
 
     reveal_menubar.pack_controls(&header);
 
@@ -564,6 +571,7 @@ fn build_window_shell(
         &find_revealer,
         git_ls_state,
         &git_ls_row,
+        reveal_menubar.hamburger(),
     );
     // VTE eats plain Ctrl+letter; capture Ctrl+G before it reaches the PTY.
     install_git_ls_shortcut(&window);
@@ -749,6 +757,7 @@ fn install_actions(
     find_revealer: &gtk::Revealer,
     git_ls_state: Option<PathBuf>,
     git_ls_row: &gtk::Box,
+    menu_btn: &gtk::ToggleButton,
 ) {
     // ---- new-tab ----
     let act_new = gio::SimpleAction::new("new-tab", None);
@@ -1108,11 +1117,12 @@ fn install_actions(
         gio::SimpleAction::new_stateful("git-colors", None, &show_switch.to_variant());
     {
         let row = git_ls_row.clone();
+        let menu_btn = menu_btn.clone();
         let state_path = git_ls_state.clone();
         let cfg = Rc::clone(&cfg);
         act_git_setting.connect_change_state(move |action, state| {
             let active = state.and_then(|s| s.get::<bool>()).unwrap_or(false);
-            row.set_visible(active);
+            row.set_visible(active && menu_btn.is_active());
             let colors_on = {
                 let mut saved = cfg.borrow_mut();
                 saved.git_colors = active;
@@ -1129,7 +1139,7 @@ fn install_actions(
         });
     }
     window.add_action(&act_git_setting);
-    git_ls_row.set_visible(show_switch);
+    git_ls_row.set_visible(false);
     if let Some(path) = git_ls_state.as_ref() {
         if let Err(err) = git_ls::write_window_state(path, show_switch && colors_on) {
             eprintln!("gtk-term: failed to write git ls state: {err}");
