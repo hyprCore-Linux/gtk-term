@@ -524,6 +524,7 @@ fn build_window_shell(
     git_ls_row.append(&git_ls_label);
     git_ls_row.append(&git_ls_switch);
     header.pack_end(&git_ls_row);
+    reveal_menubar.keep_open_on(&git_ls_row);
     {
         let row = git_ls_row.clone();
         let cfg_menu = Rc::clone(&cfg);
